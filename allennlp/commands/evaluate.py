@@ -30,7 +30,7 @@ import tqdm
 from allennlp.data import Dataset
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
 from allennlp.data.iterators import DataIterator
-from allennlp.models.archival import load_archive
+from allennlp.models.archival import load_archive, archive_model
 from allennlp.models.model import Model
 from allennlp.nn.util import arrays_to_variables
 
@@ -43,12 +43,14 @@ def add_subparser(parser: argparse._SubParsersAction) -> argparse.ArgumentParser
             'evaluate', description=description, help='Evaluate the specified model + dataset')
     subparser.add_argument('--archive_file',
                            type=str,
-                           required=True,
                            help='path to an archived trained model')
     subparser.add_argument('--evaluation_data_file',
                            type=str,
                            required=True,
                            help='path to the file containing the evaluation data')
+    subparser.add_argument('--weight_folder',
+                            type=str,
+                            help='path to the folder containing the weights')
     subparser.add_argument('--cuda_device',
                            type=int,
                            default=-1,
@@ -57,7 +59,6 @@ def add_subparser(parser: argparse._SubParsersAction) -> argparse.ArgumentParser
     subparser.set_defaults(func=evaluate_from_args)
 
     return subparser
-
 
 def evaluate(model: Model,
              dataset: Dataset,
@@ -83,6 +84,10 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     logging.getLogger('allennlp.common.params').disabled = True
     logging.getLogger('allennlp.nn.initializers').disabled = True
     logging.getLogger('allennlp.modules.token_embedders.embedding').setLevel(logging.INFO)
+
+    if(args.weight_folder is not None):
+        archive_model(args.weight_folder)
+        args.archive_file = args.weight_folder + "model.tar.gz"
 
     # Load from archive
     archive = load_archive(args.archive_file, args.cuda_device)

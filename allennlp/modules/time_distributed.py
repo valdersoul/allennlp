@@ -16,12 +16,14 @@ class TimeDistributed(torch.nn.Module):
     Note that while the above gives shapes with ``batch_size`` first, this ``Module`` also works if
     ``batch_size`` is second - we always just combine the first two dimensions, then split them.
     """
-    def __init__(self, module):
+    def __init__(self, module, sentence_c=False):
         super(TimeDistributed, self).__init__()
         self._module = module
+        self._sentence_c = sentence_c
 
     def forward(self, *inputs):  # pylint: disable=arguments-differ
         reshaped_inputs = []
+        count = 0
         for input_tensor in inputs:
             input_size = input_tensor.size()
             if len(input_size) <= 2:
@@ -29,14 +31,24 @@ class TimeDistributed(torch.nn.Module):
 
             # Squash batch_size and time_steps into a single axis; result has shape
             # (batch_size * time_steps, input_size).
-            squashed_shape = [-1] + [x for x in input_size[2:]]
+            if self._sentence_c:
+                if count:
+                    squashed_shape = [-1] + [x for x in input_size[3:]]
+                else:    
+                    squashed_shape = [-1] + [x for x in input_size[-2:]]
+            else:
+                squashed_shape = [-1] + [x for x in input_size[2:]]
             reshaped_inputs.append(input_tensor.contiguous().view(*squashed_shape))
+            count += 1
 
         reshaped_outputs = self._module(*reshaped_inputs)
 
         # Now get the output back into the right shape.
         # (batch_size, time_steps, [hidden_size])
-        new_shape = [input_size[0], input_size[1]] + [x for x in reshaped_outputs.size()[1:]]
+        if self._sentence_c:
+            new_shape = [input_size[0], input_size[1], input_size[2]] + [x for x in reshaped_outputs.size()[1:]]
+        else:
+            new_shape = [input_size[0], input_size[1]] + [x for x in reshaped_outputs.size()[1:]]
         outputs = reshaped_outputs.contiguous().view(*new_shape)
 
         return outputs

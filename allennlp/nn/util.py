@@ -27,7 +27,11 @@ def get_lengths_from_binary_sequence_mask(mask: torch.Tensor):
     A torch.LongTensor of shape (batch_size,) representing the lengths
     of the sequences in the batch.
     """
-    return mask.long().sum(-1)
+
+    length = mask.long().sum(-1)
+    length += (length == 0).long()
+
+    return length
 
 
 def sort_batch_by_length(tensor: torch.autograd.Variable, sequence_lengths: torch.autograd.Variable):

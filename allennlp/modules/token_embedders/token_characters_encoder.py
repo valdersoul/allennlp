@@ -19,10 +19,11 @@ class TokenCharactersEncoder(TokenEmbedder):
 
     We take the embedding and encoding modules as input, so this class is itself quite simple.
     """
-    def __init__(self, embedding: Embedding, encoder: Seq2VecEncoder, dropout: float = 0.0) -> None:
+    def __init__(self, embedding: Embedding, encoder: Seq2VecEncoder, dropout: float = 0.0, fourD: float = 0.0) -> None:
         super(TokenCharactersEncoder, self).__init__()
         self._embedding = TimeDistributed(embedding)
-        self._encoder = TimeDistributed(encoder)
+        self._encoder = TimeDistributed(encoder, fourD)
+        print(fourD)
         if dropout > 0:
             self._dropout = torch.nn.Dropout(p=dropout)
         else:
@@ -40,10 +41,11 @@ class TokenCharactersEncoder(TokenEmbedder):
         embedding_params: Params = params.pop("embedding")
         # Embedding.from_params() uses "tokens" as the default namespace, but we need to change
         # that to be "token_characters" by default.
-        embedding_params.setdefault("vocab_namespace", "token_characters")
+        #embedding_params.setdefault("vocab_namespace", "token_characters")
         embedding = Embedding.from_params(vocab, embedding_params)
         encoder_params: Params = params.pop("encoder")
         encoder = Seq2VecEncoder.from_params(encoder_params)
         dropout = params.pop("dropout", 0.0)
+        fourD = params.pop("4D", 0.0)
         params.assert_empty(cls.__name__)
-        return cls(embedding, encoder, dropout)
+        return cls(embedding, encoder, dropout, fourD)

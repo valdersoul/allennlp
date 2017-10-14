@@ -120,6 +120,7 @@ class SquadReader(DatasetReader):
             dataset = dataset_json['data']
         logger.info("Reading the dataset")
         instances = []
+        count = 0
         for article in tqdm(dataset):
             for paragraph_json in article['paragraphs']:
                 paragraph = paragraph_json["context"]
@@ -129,6 +130,10 @@ class SquadReader(DatasetReader):
                     question_text = question_answer["question"].strip().replace("\n", "")
                     question_id = question_answer['id'].strip()
 
+                    sentence_reader = SquadSentenceSelectionReader('paragraph', self._tokenizer, self._token_indexers)#{'tokens': self._token_indexers['tokens']})
+                    fields: Dict[str, Field] = {}
+                    sentence_reader.read(paragraph, fields, question_answer)
+                    
                     # There may be multiple answer annotations, so we pick the one that occurs the
                     # most.  This only matters on the SQuAD dev set, and it means our computed
                     # metrics ("start_acc", "end_acc", and "span_acc") aren't quite the same as the
@@ -143,6 +148,7 @@ class SquadReader(DatasetReader):
 
                     instance = self.text_to_instance(question_text,
                                                      paragraph,
+                                                     fields,
                                                      question_id,
                                                      answer_text,
                                                      char_span_start,
@@ -158,13 +164,13 @@ class SquadReader(DatasetReader):
     def text_to_instance(self,  # type: ignore
                          question_text: str,
                          passage_text: str,
+                         fields: Dict[str, Field],
                          question_id: str = None,
                          answer_text: str = None,
                          char_span_start: int = None,
                          passage_tokens: List[Token] = None,
                          answer_texts: List[str] = None) -> Instance:
         # pylint: disable=arguments-differ
-        fields: Dict[str, Field] = {}
         if not passage_tokens:
             passage_tokens = self._tokenizer.tokenize(passage_text)
         passage_offsets = [(token.idx, token.idx + len(token.text)) for token in passage_tokens]
@@ -272,11 +278,11 @@ class SquadSentenceSelectionReader(DatasetReader):
         negative_sentences: Set[Tuple[str, int]] = set()
         for selection_method in self._negative_sentence_selection_methods:
             if selection_method == 'paragraph':
-                paragraph_id = self._sentence_paragraph_map[answer_id]
+                paragraph_id = self._sentence_paragraph_map[answer_id[0]]
                 paragraph_sentences = self._paragraph_sentences[paragraph_id]
                 negative_sentences.update(("sentence", sentence_id)
-                                          for sentence_id in paragraph_sentences
-                                          if sentence_id != answer_id)
+                                          for sentence_id in paragraph_sentences)
+                                        #   if sentence_id != answer_id)
             elif selection_method.startswith("random-"):
                 num_to_pick = int(selection_method.split('-')[1])
                 num_sentences = len(self._sentence_to_id)
@@ -310,108 +316,109 @@ class SquadSentenceSelectionReader(DatasetReader):
                 negative_sentences.update(("question", q_id) for q_id in selected_ids)
             else:
                 raise RuntimeError("Unrecognized selection method:", selection_method)
-        choices = list(negative_sentences) + [("sentence", answer_id)]
-        random.shuffle(choices)
-        correct_choice = choices.index(("sentence", answer_id))
+        choices = list(negative_sentences)# + [("sentence", answer_id)]
+        #random.shuffle(choices)
+        correct_choice = [choices.index(("sentence", a)) for a in answer_id]
         sentence_choices = []
         for sentence_type, index in choices:
             if sentence_type == "sentence":
                 sentence_choices.append(self._id_to_sentence[index])
             else:
                 sentence_choices.append(self._id_to_question[index])
-        return sentence_choices, correct_choice
+        return correct_choice
 
     @overrides
-    def read(self, file_path: str):
+    def read(self, context_article, fields, question_answer):
         # Import is here, since it isn't necessary by default.
         import nltk
 
         # Holds tuples of (question_text, answer_sentence_id)
         questions = []
-        logger.info("Reading file at %s", file_path)
-        with open(file_path) as dataset_file:
-            dataset_json = json.load(dataset_file)
-            dataset = dataset_json['data']
-        logger.info("Reading the dataset")
-        for article in tqdm(dataset):
-            for paragraph in article['paragraphs']:
-                paragraph_id = len(self._paragraph_sentences)
-                self._paragraph_sentences[paragraph_id] = []
+        # logger.info("Reading file at %s", file_path)
+        # with open(file_path) as dataset_file:
+        #     dataset_json = json.load(dataset_file)
+        #     dataset = dataset_json['data']
+        # logger.info("Reading the dataset")
+        # for article in tqdm(dataset):
+            # for paragraph in article['paragraphs']:
+        paragraph_id = len(self._paragraph_sentences)
+        self._paragraph_sentences[paragraph_id] = []
 
-                context_article = paragraph["context"]
+        # context_article = paragraph["context"]
 
-                # Split the context_article into a list of sentences.
-                sentences = nltk.sent_tokenize(context_article)
+        # Split the context_article into a list of sentences.
+        sentences = nltk.sent_tokenize(context_article)
 
-                # Make a dict from span indices to sentence. The end span is
-                # exclusive, and the start span is inclusive.
-                span_to_sentence_index = {}
-                current_index = 0
-                for sentence in sentences:
-                    sentence_id = len(self._sentence_to_id)
-                    self._sentence_to_id[sentence] = sentence_id
-                    self._id_to_sentence[sentence_id] = sentence
-                    self._sentence_paragraph_map[sentence_id] = paragraph_id
-                    self._paragraph_sentences[paragraph_id].append(sentence_id)
+        # Make a dict from span indices to sentence. The end span is
+        # exclusive, and the start span is inclusive.
+        span_to_sentence_index = {}
+        current_index = 0
+        for sentence in sentences:
+            sentence_id = len(self._sentence_to_id)
+            self._sentence_to_id[sentence] = sentence_id
+            self._id_to_sentence[sentence_id] = sentence
+            self._sentence_paragraph_map[sentence_id] = paragraph_id
+            self._paragraph_sentences[paragraph_id].append(sentence_id)
 
-                    sentence_len = len(sentence)
-                    # Need to add one to the end index to account for the
-                    # trailing space after punctuation that is stripped by NLTK.
-                    span_to_sentence_index[(current_index,
-                                            current_index + sentence_len + 1)] = sentence
-                    current_index += sentence_len + 1
-                for question_answer in paragraph['qas']:
-                    question_text = question_answer["question"].strip()
-                    question_id = len(self._question_to_id)
-                    self._question_to_id[question_text] = question_id
-                    self._id_to_question[question_id] = question_text
+            sentence_len = len(sentence)
+            # Need to add one to the end index to account for the
+            # trailing space after punctuation that is stripped by NLTK.
+            span_to_sentence_index[(current_index,
+                                    current_index + sentence_len + 1)] = sentence
+            current_index += sentence_len + 1
+        # for question_answer in paragraph['qas']:
+        question_text = question_answer["question"].strip()
+        question_id = len(self._question_to_id)
+        self._question_to_id[question_text] = question_id
+        self._id_to_question[question_id] = question_text
 
-                    # There may be multiple answer annotations, so pick the one
-                    # that occurs the most.
-                    candidate_answer_start_indices: Counter = Counter()
-                    for answer in question_answer["answers"]:
-                        candidate_answer_start_indices[answer["answer_start"]] += 1
-                    answer_start_index, _ = candidate_answer_start_indices.most_common(1)[0]
+        # There may be multiple answer annotations, so pick the one
+        # that occurs the most.
+        candidate_answer_start_indices: Counter = Counter()
+        for answer in question_answer["answers"]:
+            candidate_answer_start_indices[answer["answer_start"]] += 1
+        answer_start_index = candidate_answer_start_indices.keys()
+        #answer_start_index, _ = candidate_answer_start_indices.most_common(1)[0]
 
-                    # Get the full sentence corresponding to the answer.
-                    answer_sentence = None
-                    for span_tuple in span_to_sentence_index:
-                        start_span, end_span = span_tuple
-                        if start_span <= answer_start_index and answer_start_index < end_span:
-                            answer_sentence = span_to_sentence_index[span_tuple]
-                            break
-                    else:  # no break
-                        raise ValueError("Index of answer start was out of bounds. "
-                                         "This should never happen, please raise "
-                                         "an issue on GitHub.")
-
-                    # Now that we have the string of the full sentence, we need to
-                    # search for it in our shuffled list to get the index.
-                    answer_id = self._sentence_to_id[answer_sentence]
-
-                    # Now we can make the string representation and add this
-                    # to the list of processed_rows.
-                    questions.append((question_id, answer_id))
-        instances = []
-        logger.info("Processing questions into training instances")
-        for question_id, answer_id in tqdm(questions):
-            sentence_choices, correct_choice = self._get_sentence_choices(question_id, answer_id)
+        # Get the full sentence corresponding to the answer.
+        #answer_sentence = None
+        answer_sentence = []
+        for span_tuple in span_to_sentence_index:
+            start_span, end_span = span_tuple
+            #if start_span <= answer_start_index and answer_start_index < end_span:
+            if any(start_span <= index and index < end_span for index in answer_start_index):
+                answer_sentence.append(span_to_sentence_index[span_tuple])
+                #break
+        # else:  # no break
+        #     raise ValueError("Index of answer start was out of bounds. "
+        #                         "This should never happen, please raise "
+        #                         "an issue on GitHub.")
+        # Now that we have the string of the full sentence, we need to
+        # search for it in our shuffled list to get the index.
+        answer_id = set([self._sentence_to_id[i] for i in answer_sentence])
+        # Now we can make the string representation and add this
+        # to the list of processed_rows.
+        questions.append((question_id, answer_id))
+        # instances = []
+        # logger.info("Processing questions into training instances")
+        for question_id, answer_id in questions:
+            #correct_choice = self._get_sentence_choices(question_id, answer_id)
             question_text = self._id_to_question[question_id]
-            instance = self.text_to_instance(question_text, sentence_choices, correct_choice)
-            instances.append(instance)
+            instance = self.text_to_instance(question_text, sentences, fields, answer_id)
+        #     instances.append(instance)
 
-        if not instances:
-            raise ConfigurationError("No instances were read from the given filepath {}. "
-                                     "Is the path correct?".format(file_path))
-        return Dataset(instances)
+        # if not instances:
+        #     raise ConfigurationError("No instances were read from the given filepath {}. "
+        #                              "Is the path correct?".format(file_path))
+        return
 
     @overrides
     def text_to_instance(self,  # type: ignore
                          question: str,
                          sentences: List[str],
+                         fields: Dict[str, Field],
                          correct_choice: int = None) -> Instance:
         # pylint: disable=arguments-differ
-        fields: Dict[str, Field] = {}
         sentence_fields: List[Field] = []
         for sentence in sentences:
             tokenized_sentence = self._tokenizer.tokenize(sentence)
@@ -421,10 +428,20 @@ class SquadSentenceSelectionReader(DatasetReader):
         sentences_field = ListField(sentence_fields)
         fields['sentences'] = sentences_field
         question_tokens = self._tokenizer.tokenize(question)
-        fields['question'] = TextField(question_tokens, self._token_indexers)
+        fields['question_sentence'] = ListField([TextField(question_tokens, self._token_indexers)])
         if correct_choice is not None:
-            fields['correct_sentence'] = IndexField(correct_choice, sentences_field)
-        return Instance(fields)
+            l = []
+            for i in correct_choice:
+                temp = IndexField(i, sentences_field)
+                l.append(temp)
+            fields['correct_sentence'] = ListField(l)
+
+            l = []
+            for index, _ in enumerate(sentences):
+                temp = IndexField( 2 if index in correct_choice else 1, sentences_field) 
+                l.append(temp)
+            fields['correct_label'] = ListField(l)
+        return
 
     @classmethod
     def from_params(cls, params: Params) -> 'SquadSentenceSelectionReader':
