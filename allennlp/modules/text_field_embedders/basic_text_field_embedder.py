@@ -41,12 +41,16 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
             raise ConfigurationError(message)
         embedded_representations = []
         keys = sorted(text_field_input.keys())
+        pos_embedding = ''
         for key in keys:
             tensor = text_field_input[key]
             embedder = self._token_embedders[key]
             token_vectors = embedder(tensor)
-            embedded_representations.append(token_vectors)
-        return torch.cat(embedded_representations, dim=-1)
+            if 'pos' in key:
+                pos_embedding = token_vectors
+            else:
+                embedded_representations.append(token_vectors)
+        return torch.cat(embedded_representations, dim=-1), pos_embedding
 
     @classmethod
     def from_params(cls, vocab: Vocabulary, params: Params) -> 'BasicTextFieldEmbedder':

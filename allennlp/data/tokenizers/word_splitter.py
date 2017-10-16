@@ -156,19 +156,26 @@ class SpacyWordSplitter(WordSplitter):
 
     @overrides
     def split_words(self, sentence: str) -> List[Token]:
-        return self.spacy(sentence)  # type: ignore
+        return [t for t in self.spacy(sentence) if not t.is_space]
 
     def _get_spacy_model(self, language: str, pos_tags: bool, parse: bool, ner: bool) -> Any:
         options = (language, pos_tags, parse, ner)
         if options not in self._spacy_tokenizers:
-            spacy_model = spacy.load(language, parser=parse, tagger=pos_tags, entity=ner)
+            kwargs = {'vectors': False}
+            if not pos_tags:
+                kwargs['tagger'] = False
+            if not parse:
+                kwargs['parser'] = False
+            if not ner:
+                kwargs['entity'] = False
+            spacy_model = spacy.load(language, **kwargs)
             self._spacy_tokenizers[options] = spacy_model
         return self._spacy_tokenizers[options]
 
     @classmethod
     def from_params(cls, params: Params) -> 'WordSplitter':
         language = params.pop('language', 'en')
-        pos_tags = params.pop('pos_tags', False)
+        pos_tags = params.pop('pos_tags', True)
         parse = params.pop('parse', False)
         ner = params.pop('ner', False)
         params.assert_empty(cls.__name__)
