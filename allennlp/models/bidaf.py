@@ -13,7 +13,7 @@ from allennlp.modules import Highway, MatrixAttention
 from allennlp.modules import Seq2SeqEncoder, SimilarityFunction, TimeDistributed, TextFieldEmbedder
 from allennlp.nn import InitializerApplicator, util
 from allennlp.training.metrics import Average, BooleanAccuracy, CategoricalAccuracy
-from allennlp.models.interweighted import interWeighted, finalModel
+from allennlp.models.interweighted import interWeighted, finalModel, posAvg
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -87,6 +87,7 @@ class BidirectionalAttentionFlow(Model):
 
         self._inter_attention = interWeighted(200)
         self._final_model = finalModel(800, 3)
+        #self._pos_avg = posAvg(16)
 
         self._phrase_layer = phrase_layer
         self._matrix_attention = MatrixAttention(attention_similarity_function)
@@ -97,11 +98,11 @@ class BidirectionalAttentionFlow(Model):
         encoding_dim = phrase_layer.get_output_dim()
         modeling_dim = modeling_layer.get_output_dim()
         #  change 5 from 4 and same as ent_predictor
-        span_start_input_dim = encoding_dim * 6 + modeling_dim
+        span_start_input_dim = encoding_dim * 4 + modeling_dim
         self._span_start_predictor = TimeDistributed(torch.nn.Linear(span_start_input_dim, 1))
 
         span_end_encoding_dim = span_end_encoder.get_output_dim()
-        span_end_input_dim = encoding_dim * 6 + span_end_encoding_dim
+        span_end_input_dim = encoding_dim * 4 + span_end_encoding_dim
         self._span_end_predictor = TimeDistributed(torch.nn.Linear(span_end_input_dim, 1))
         initializer(self)
 
@@ -201,17 +202,16 @@ class BidirectionalAttentionFlow(Model):
         # sentence embedding:
         # embedded_passage_sentences, _ = self._sentence_embedder(sentences)
         # embedded_question_sentence, _ = self._sentence_embedder(question_sentence)
-        # sentence_size = embedded_passage_sentences.size()
-        # question_size = embedded_question_sentence.size()
+        # sentence_size = sentences['tokens'].size()
+        # question_size = question_sentence['tokens'].size()
         # embedded_question_sentence = embedded_question_sentence.repeat(1, sentence_size[1], 1, 1)
         # embedded_question_sentence = embedded_question_sentence.view(-1, question_size[-2], question_size[-1])
         # embedded_passage_sentences = embedded_passage_sentences.view(-1, sentence_size[-2], sentence_size[-1])
 
-        # batch_size = sentence_size[0]
+        # batch_size = sentence_size[0] * sentence_size[1]
 
-        # question_mask = util.get_text_field_mask(question_sentence).float().repeat(1, sentence_size[1], 1).view(embedded_passage_sentences.size()[0], -1)
-        # passage_mask = util.get_text_field_mask(sentences).float().view(embedded_passage_sentences.size()[0], -1)
- 
+        # question_mask = util.get_text_field_mask(question_sentence).float().repeat(1, sentence_size[1], 1)
+        # passage_mask = util.get_text_field_mask(sentences)
 
         # question_lstm_mask = question_mask if self._mask_lstms else None
         # passage_lstm_mask = passage_mask if self._mask_lstms else None
@@ -267,7 +267,7 @@ class BidirectionalAttentionFlow(Model):
         # output_dict["loss"] = sentence_loss
 
         # sentence embedding end
-        question_embedding, _ = self._text_field_embedder(question)
+        question_embedding, question_pos = self._text_field_embedder(question)
         passage_embedding, _ = self._text_field_embedder(passage)
         embedded_question = self._highway_layer(question_embedding)
         embedded_passage = self._highway_layer(passage_embedding)
@@ -283,6 +283,8 @@ class BidirectionalAttentionFlow(Model):
         encoding_dim = encoded_question.size(-1)
 
         # ----- inter_attention
+        # question_avg_weights =  util.masked_softmax(self._pos_avg(question_pos), question_mask)
+        # avg_question = util.weighted_sum(encoded_question, question_avg_weights)
         sentence_embedding_weight = util.masked_softmax(self._inter_attention(encoded_passage, encoded_question), passage_mask)
         sentence_embedding_weight = sentence_embedding_weight.unsqueeze(-1).repeat(1,1,200)
         # -----
@@ -294,9 +296,9 @@ class BidirectionalAttentionFlow(Model):
         # Shape: (batch_size, passage_length, encoding_dim)
         passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
 
-        passage_passage_similarity = self._matrix_attention(passage_question_vectors, passage_question_vectors)
-        passage_passage_attention = util.last_dim_softmax(passage_passage_similarity, passage_mask)
-        passage_self_vectors = util.weighted_sum(passage_question_vectors, passage_passage_attention)
+        # passage_passage_similarity = self._matrix_attention(passage_question_vectors, passage_question_vectors)
+        # passage_passage_attention = util.last_dim_softmax(passage_passage_similarity, passage_mask)
+        # passage_self_vectors = util.weighted_sum(passage_question_vectors, passage_passage_attention)
 
         # We replace masked values with something really negative here, so they don't affect the
         # max below.
@@ -315,9 +317,9 @@ class BidirectionalAttentionFlow(Model):
                                                                                     encoding_dim)
 
         # Shape: (batch_size, passage_length, encoding_dim * 4)
-        final_merged_passage = torch.cat([encoded_passage,
+        final_merged_passage = torch.cat([#encoded_passage,
                                           passage_question_vectors,
-                                          passage_self_vectors,
+                                          #passage_self_vectors,
                                           encoded_passage * sentence_embedding_weight,
                                           encoded_passage * passage_question_vectors,
                                           encoded_passage * tiled_question_passage_vector],

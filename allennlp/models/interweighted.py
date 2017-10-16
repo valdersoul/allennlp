@@ -19,6 +19,15 @@ class interWeighted(nn.Module):
 
         return f2.squeeze()
 
+class posAvg(nn.Module):
+    def __init__(self, emb_size):
+        super(posAvg, self).__init__()
+
+        self.fc1 = nn.Linear(emb_size, 1)
+    
+    def forward(self, pos):
+        weights = self.fc1(pos)
+        return weights
 
 class finalModel(nn.Module):
     def __init__(self, hidden_length, cls_number):

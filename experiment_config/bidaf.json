@@ -13,10 +13,10 @@
           "start_tokens": [259],
           "end_tokens": [260]
         }
+      },
+      "token_pos": {
+        "type": "pos_tag"
       }
-      // "token_pos": {
-      //   "type": "pos_tag"
-      // }
     }
   },
   "train_data_path": "/home/valder/Git/allennlp/data/train-v1.1.json",
@@ -44,6 +44,10 @@
           "ngram_filter_sizes": [5]
         },
         "dropout": 0.2
+      },
+      "token_pos": {
+        "type": "embedding",
+        "embedding_dim": 16
       }
     },
     // "sentence_field_embedder": {
@@ -94,7 +98,7 @@
     "modeling_layer": {
       "type": "lstm",
       "bidirectional": true,
-      "input_size": 1200,
+      "input_size": 800,
       "hidden_size": 100,
       "num_layers": 2,
       "dropout": 0.2
@@ -102,7 +106,7 @@
     "span_end_encoder": {
       "type": "lstm",
       "bidirectional": true,
-      "input_size": 1800,
+      "input_size": 1400,
       "hidden_size": 100,
       "num_layers": 1,
       "dropout": 0.2
@@ -112,7 +116,7 @@
   "iterator": {
     "type": "bucket",
     "sorting_keys": [["passage", "num_tokens"], ["question", "num_tokens"]],
-    "batch_size": 16
+    "batch_size": 40
   },
 
   "trainer": {

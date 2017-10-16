@@ -30,7 +30,9 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
     @overrides
     def get_output_dim(self) -> int:
         output_dim = 0
-        for embedder in self._token_embedders.values():
+        for key, embedder in self._token_embedders.items():
+            if 'pos' in key:
+                continue
             output_dim += embedder.get_output_dim()
         return output_dim
 
