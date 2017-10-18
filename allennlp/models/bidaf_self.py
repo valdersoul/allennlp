@@ -14,6 +14,7 @@ from allennlp.modules import Seq2SeqEncoder, TimeDistributed, TextFieldEmbedder
 from allennlp.models.tri_linear_att import TriLinearAttention
 from allennlp.nn import InitializerApplicator, util
 from allennlp.training.metrics import Average, BooleanAccuracy, CategoricalAccuracy
+from allennlp.models.interweighted import interWeighted
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -38,7 +39,8 @@ class BidafPlusSelfAttention(Model):
         self._highway_layer = TimeDistributed(Highway(text_field_embedder.get_output_dim(),
                                                 2))
 
-        self._merge_atten = TimeDistributed(torch.nn.Linear(200 * 4, 200))
+        self._inter_attention = interWeighted(200)
+        self._merge_atten = TimeDistributed(torch.nn.Linear(200 * 5, 200))
 
         self._residual_encoder = residual_encoder
         self._self_atten = TriLinearAttention(200)
@@ -138,6 +140,10 @@ class BidafPlusSelfAttention(Model):
         encoded_passage = self._dropout(self._phrase_layer(embedded_passage, passage_lstm_mask))
         encoding_dim = encoded_question.size(-1)
 
+        sentence_embedding_weight = util.masked_softmax(self._inter_attention(encoded_passage, encoded_question), passage_mask)
+        sentence_embedding_weight = sentence_embedding_weight.unsqueeze(-1).repeat(1,1,200)
+
+
         # Shape: (batch_size, passage_length, question_length)
         passage_question_similarity = self._matrix_attention(encoded_passage, encoded_question)
         # Shape: (batch_size, passage_length, question_length)
@@ -164,6 +170,7 @@ class BidafPlusSelfAttention(Model):
         # Shape: (batch_size, passage_length, encoding_dim * 4)
         final_merged_passage = torch.cat([encoded_passage,
                                           passage_question_vectors,
+                                          encoded_passage * sentence_embedding_weight,
                                           encoded_passage * passage_question_vectors,
                                           encoded_passage * tiled_question_passage_vector],
                                          dim=-1)
