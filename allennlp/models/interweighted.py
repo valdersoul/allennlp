@@ -41,3 +41,14 @@ class finalModel(nn.Module):
         f2 = self.fc2(f1)
 
         return f2
+
+class fusionNet(nn.Module):
+    def __init__(self, in_size, out_size):
+        super(fusionNet, self).__init__()
+        self.fusion = nn.Linear(in_size, out_size)
+        self.score = nn.Linear(in_size, 1)
+
+    def forward(self, input, fusion):
+        gate = F.sigmoid(self.score(fusion))
+        fusion_part = F.tanh(self.fusion(fusion))
+        return gate * fusion_part + (1 - gate) * input

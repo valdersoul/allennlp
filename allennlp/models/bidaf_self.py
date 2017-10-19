@@ -14,7 +14,7 @@ from allennlp.modules import Seq2SeqEncoder, TimeDistributed, TextFieldEmbedder
 from allennlp.models.tri_linear_att import TriLinearAttention
 from allennlp.nn import InitializerApplicator, util
 from allennlp.training.metrics import Average, BooleanAccuracy, CategoricalAccuracy
-from allennlp.models.interweighted import interWeighted
+from allennlp.models.interweighted import interWeighted, fusionNet
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -44,13 +44,18 @@ class BidafPlusSelfAttention(Model):
 
         self._residual_encoder = residual_encoder
         self._self_atten = TriLinearAttention(200)
-        self._merge_self_atten = TimeDistributed(torch.nn.Linear(200 * 3, 200))
+        #self._merge_self_atten = TimeDistributed(torch.nn.Linear(200 * 3, 200))
 
         self._span_start_encoder = span_start_encoder
         self._span_end_encoder = span_end_encoder
 
         self._span_start_predictor = TimeDistributed(torch.nn.Linear(200, 1))
         self._span_end_predictor = TimeDistributed(torch.nn.Linear(200, 1))
+
+        self._fuse_q = TimeDistributed(fusionNet(800,200))
+        self._fuse_question = TimeDistributed(fusionNet(800, 200))
+        self._fuse_redidual = TimeDistributed(fusionNet(400, 200))
+        self._fuse_self = TimeDistributed(fusionNet(1000, 200))
 
         initializer(self)
 
@@ -140,9 +145,8 @@ class BidafPlusSelfAttention(Model):
         encoded_passage = self._dropout(self._phrase_layer(embedded_passage, passage_lstm_mask))
         encoding_dim = encoded_question.size(-1)
 
-        sentence_embedding_weight = util.masked_softmax(self._inter_attention(encoded_passage, encoded_question), passage_mask)
-        sentence_embedding_weight = sentence_embedding_weight.unsqueeze(-1).repeat(1,1,200)
-
+        # sentence_embedding_weight = util.masked_softmax(self._inter_attention(encoded_passage, encoded_question), passage_mask)
+        # sentence_embedding_weight = sentence_embedding_weight.unsqueeze(-1).repeat(1,1,200)
 
         # Shape: (batch_size, passage_length, question_length)
         passage_question_similarity = self._matrix_attention(encoded_passage, encoded_question)
@@ -150,6 +154,15 @@ class BidafPlusSelfAttention(Model):
         passage_question_attention = util.last_dim_softmax(passage_question_similarity, question_mask)
         # Shape: (batch_size, passage_length, encoding_dim)
         passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
+
+        encoded_passage = self._fuse_q(encoded_passage, torch.cat([encoded_passage,
+                                                                   passage_question_vectors,
+                                                                   encoded_passage * passage_question_vectors,
+                                                                   encoded_passage - passage_question_vectors], dim = -1)
+                                                                   )
+        
+        sentence_embedding_weight = util.masked_softmax(self._inter_attention(encoded_passage, encoded_question), passage_mask)
+        sentence_embedding_weight = sentence_embedding_weight.unsqueeze(-1).repeat(1,1,200)
 
         # We replace masked values with something really negative here, so they don't affect the
         # max below.
@@ -166,19 +179,26 @@ class BidafPlusSelfAttention(Model):
         tiled_question_passage_vector = question_passage_vector.unsqueeze(1).expand(batch_size,
                                                                                     passage_length,
                                                                                     encoding_dim)
-
+        fuse_question = self._fuse_question(encoded_passage, 
+                                                torch.cat([encoded_passage, 
+                                                encoded_passage * sentence_embedding_weight,
+                                                encoded_passage - tiled_question_passage_vector,
+                                                encoded_passage * tiled_question_passage_vector], dim=-1))
         # Shape: (batch_size, passage_length, encoding_dim * 4)
-        final_merged_passage = torch.cat([encoded_passage,
-                                          passage_question_vectors,
-                                          encoded_passage * sentence_embedding_weight,
-                                          encoded_passage * passage_question_vectors,
-                                          encoded_passage * tiled_question_passage_vector],
-                                         dim=-1)
+        # final_merged_passage = torch.cat([encoded_passage,
+        #                                   passage_question_vectors,
+        #                                   encoded_passage * sentence_embedding_weight,
+        #                                   encoded_passage * passage_question_vectors,
+        #                                   encoded_passage * tiled_question_passage_vector],
+        #                                  dim=-1)
 
-        final_merged_passage = F.relu(self._merge_atten(final_merged_passage))
+        final_merged_passage = fuse_question
 
         residual_layer = self._dropout(self._residual_encoder(self._dropout(final_merged_passage), passage_mask))
         self_atten_matrix = self._self_atten(residual_layer, residual_layer)
+
+        residual_layer = self._fuse_redidual(residual_layer, torch.cat([final_merged_passage,
+                                                                        residual_layer], dim=-1))
 
         mask = passage_mask.resize(batch_size, passage_length, 1) * passage_mask.resize(batch_size, 1, passage_length)
 
@@ -193,11 +213,14 @@ class BidafPlusSelfAttention(Model):
         # (batch, passage_len, passage_len) * (batch, passage_len, dim) -> (batch, passage_len, dim)
         self_atten_vecs = torch.matmul(self_atten_probs, residual_layer)
 
-        residual_layer = F.relu(self._merge_self_atten(torch.cat(
-            [self_atten_vecs, residual_layer, residual_layer * self_atten_vecs], dim=-1)))
+        # residual_layer = F.relu(self._merge_self_atten(torch.cat(
+        #     [self_atten_vecs, residual_layer, residual_layer * self_atten_vecs], dim=-1)))
 
-        final_merged_passage += residual_layer
-
+        final_merged_passage = self._fuse_self(residual_layer, torch.cat([residual_layer,
+                                                                         final_merged_passage,
+                                                                         self_atten_vecs,
+                                                                         residual_layer - self_atten_vecs,
+                                                                         residual_layer * self_atten_vecs], dim=-1))
         final_merged_passage = self._dropout(final_merged_passage)
 
         start_rep = self._span_start_encoder(final_merged_passage, passage_lstm_mask)

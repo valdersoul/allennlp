@@ -54,7 +54,7 @@
       "bidirectional": true,
       "input_size": 200,
       "hidden_size": 100,
-      "num_layers": 1
+      "num_layers": 2
     },
     "span_start_encoder": {
       "type": "gru",
