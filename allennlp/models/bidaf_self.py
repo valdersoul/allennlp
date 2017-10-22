@@ -1,4 +1,5 @@
 import logging
+import numpy as np
 from typing import Any, Dict, List
 
 import torch
@@ -12,9 +13,9 @@ from allennlp.models.model import Model
 from allennlp.modules import Highway
 from allennlp.modules import Seq2SeqEncoder, TimeDistributed, TextFieldEmbedder
 from allennlp.models.tri_linear_att import TriLinearAttention
+#from allennlp.modules.variational_dropout import VariationalDropout
 from allennlp.nn import InitializerApplicator, util
 from allennlp.training.metrics import Average, BooleanAccuracy, CategoricalAccuracy
-from allennlp.models.interweighted import interWeighted, fusionNet
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -37,25 +38,22 @@ class BidafPlusSelfAttention(Model):
         self._phrase_layer = phrase_layer
         self._matrix_attention = TriLinearAttention(200)
         self._highway_layer = TimeDistributed(Highway(text_field_embedder.get_output_dim(),
-                                                2))
-
-        self._inter_attention = interWeighted(200)
-        self._merge_atten = TimeDistributed(torch.nn.Linear(200 * 5, 200))
+                                        2))
+        self._merge_atten = TimeDistributed(torch.nn.Linear(200 * 4, 200))
+        self._merge_gate = TimeDistributed(torch.nn.Linear(200 * 4, 200))
 
         self._residual_encoder = residual_encoder
         self._self_atten = TriLinearAttention(200)
-        #self._merge_self_atten = TimeDistributed(torch.nn.Linear(200 * 3, 200))
+        self._merge_self_atten = TimeDistributed(torch.nn.Linear(200 * 3, 200))
+        self._merge_question = TimeDistributed(torch.nn.Linear(200 * 3, 200))
+        self._merge_question_gate = TimeDistributed(torch.nn.Linear(200 * 3, 200))
+        self._question_attention = TriLinearAttention(200)
 
         self._span_start_encoder = span_start_encoder
         self._span_end_encoder = span_end_encoder
 
         self._span_start_predictor = TimeDistributed(torch.nn.Linear(200, 1))
         self._span_end_predictor = TimeDistributed(torch.nn.Linear(200, 1))
-
-        self._fuse_q = TimeDistributed(fusionNet(800,200))
-        self._fuse_question = TimeDistributed(fusionNet(800, 200))
-        self._fuse_redidual = TimeDistributed(fusionNet(400, 200))
-        self._fuse_self = TimeDistributed(fusionNet(1000, 200))
 
         initializer(self)
 
@@ -66,7 +64,7 @@ class BidafPlusSelfAttention(Model):
         self._official_f1 = Average()
         if dropout > 0:
             self._dropout = torch.nn.Dropout(p=dropout)
-            # self._dropout = torch.nn.dropout(p=dropout)
+            #self._dropout = VariationalDropout(p=dropout)
         else:
             raise ValueError()
             # self._dropout = lambda x: x
@@ -132,8 +130,8 @@ class BidafPlusSelfAttention(Model):
         """
         question_embedding, question_pos = self._text_field_embedder(question)
         passage_embedding, _ = self._text_field_embedder(passage)
-        embedded_question = self._highway_layer(question_embedding)
-        embedded_passage = self._highway_layer(passage_embedding)
+        embedded_question = self._dropout(self._highway_layer(question_embedding))
+        embedded_passage = self._dropout(self._highway_layer(passage_embedding))
         batch_size = embedded_question.size(0)
         passage_length = embedded_passage.size(1)
         question_mask = util.get_text_field_mask(question).float()
@@ -145,24 +143,12 @@ class BidafPlusSelfAttention(Model):
         encoded_passage = self._dropout(self._phrase_layer(embedded_passage, passage_lstm_mask))
         encoding_dim = encoded_question.size(-1)
 
-        # sentence_embedding_weight = util.masked_softmax(self._inter_attention(encoded_passage, encoded_question), passage_mask)
-        # sentence_embedding_weight = sentence_embedding_weight.unsqueeze(-1).repeat(1,1,200)
-
         # Shape: (batch_size, passage_length, question_length)
         passage_question_similarity = self._matrix_attention(encoded_passage, encoded_question)
         # Shape: (batch_size, passage_length, question_length)
         passage_question_attention = util.last_dim_softmax(passage_question_similarity, question_mask)
         # Shape: (batch_size, passage_length, encoding_dim)
         passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
-
-        encoded_passage = self._fuse_q(encoded_passage, torch.cat([encoded_passage,
-                                                                   passage_question_vectors,
-                                                                   encoded_passage * passage_question_vectors,
-                                                                   encoded_passage - passage_question_vectors], dim = -1)
-                                                                   )
-        
-        sentence_embedding_weight = util.masked_softmax(self._inter_attention(encoded_passage, encoded_question), passage_mask)
-        sentence_embedding_weight = sentence_embedding_weight.unsqueeze(-1).repeat(1,1,200)
 
         # We replace masked values with something really negative here, so they don't affect the
         # max below.
@@ -179,49 +165,55 @@ class BidafPlusSelfAttention(Model):
         tiled_question_passage_vector = question_passage_vector.unsqueeze(1).expand(batch_size,
                                                                                     passage_length,
                                                                                     encoding_dim)
-        fuse_question = self._fuse_question(encoded_passage, 
-                                                torch.cat([encoded_passage, 
-                                                encoded_passage * sentence_embedding_weight,
-                                                encoded_passage - tiled_question_passage_vector,
-                                                encoded_passage * tiled_question_passage_vector], dim=-1))
-        # Shape: (batch_size, passage_length, encoding_dim * 4)
-        # final_merged_passage = torch.cat([encoded_passage,
-        #                                   passage_question_vectors,
-        #                                   encoded_passage * sentence_embedding_weight,
-        #                                   encoded_passage * passage_question_vectors,
-        #                                   encoded_passage * tiled_question_passage_vector],
-        #                                  dim=-1)
 
-        final_merged_passage = fuse_question
+        # Shape: (batch_size, passage_length, encoding_dim * 4)
+        final_merged_passage = torch.cat([encoded_passage,
+                                          passage_question_vectors,
+                                          encoded_passage * passage_question_vectors,
+                                          encoded_passage * tiled_question_passage_vector],
+                                         dim=-1)
+
+        final_merged_passage_ = F.relu(self._merge_atten(final_merged_passage))
+        final_gate = F.sigmoid(self._merge_gate(final_merged_passage))
+        final_merged_passage = final_merged_passage_ * final_gate
 
         residual_layer = self._dropout(self._residual_encoder(self._dropout(final_merged_passage), passage_mask))
         self_atten_matrix = self._self_atten(residual_layer, residual_layer)
-
-        residual_layer = self._fuse_redidual(residual_layer, torch.cat([final_merged_passage,
-                                                                        residual_layer], dim=-1))
 
         mask = passage_mask.resize(batch_size, passage_length, 1) * passage_mask.resize(batch_size, 1, passage_length)
 
         # torch.eye does not have a gpu implementation, so we are forced to use the cpu one and .cuda()
         # Not sure if this matters for performance
-        self_mask = Variable(torch.eye(passage_length, passage_length).cuda()).resize(1, passage_length, passage_length)
-        mask = mask * (1 - self_mask)
+        position_matrix = np.repeat(np.resize(np.arange(passage_length), [1, passage_length]), [passage_length], axis=0)
+        position_matrix = Variable(torch.from_numpy(1 - abs(position_matrix - np.transpose(position_matrix)) / passage_length).float()).cuda()
 
+        self_mask = Variable(torch.eye(passage_length, passage_length).cuda()).resize(1, passage_length, passage_length)
+        mask = mask * (1 - self_mask) * position_matrix
         self_atten_probs = util.last_dim_softmax(self_atten_matrix, mask)
 
         # Batch matrix multiplication:
         # (batch, passage_len, passage_len) * (batch, passage_len, dim) -> (batch, passage_len, dim)
         self_atten_vecs = torch.matmul(self_atten_probs, residual_layer)
 
-        # residual_layer = F.relu(self._merge_self_atten(torch.cat(
-        #     [self_atten_vecs, residual_layer, residual_layer * self_atten_vecs], dim=-1)))
+        residual_layer = F.relu(self._merge_self_atten(torch.cat(
+            [self_atten_vecs, residual_layer, residual_layer * self_atten_vecs], dim=-1)))
 
-        final_merged_passage = self._fuse_self(residual_layer, torch.cat([residual_layer,
-                                                                         final_merged_passage,
-                                                                         self_atten_vecs,
-                                                                         residual_layer - self_atten_vecs,
-                                                                         residual_layer * self_atten_vecs], dim=-1))
+        final_merged_passage += residual_layer
+
+        passage_question_similarity = self._question_attention(final_merged_passage, encoded_question)
+        passage_question_attention = util.last_dim_softmax(passage_question_similarity, question_mask)
+        passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
+
+        final_merged_passage = torch.cat(
+            [final_merged_passage, passage_question_vectors, final_merged_passage * passage_question_vectors], dim=-1
+        )
+
+        final_merged_passage_ = F.relu(self._merge_question(final_merged_passage))
+        final_gate = F.sigmoid(self._merge_question_gate(final_merged_passage))
+
+        final_merged_passage = final_gate * final_merged_passage_
         final_merged_passage = self._dropout(final_merged_passage)
+        
 
         start_rep = self._span_start_encoder(final_merged_passage, passage_lstm_mask)
         span_start_logits = self._span_start_predictor(start_rep).squeeze(-1)
