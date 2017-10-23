@@ -26,6 +26,7 @@ class BidafPlusSelfAttention(Model):
     def __init__(self, vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
                  phrase_layer: Seq2SeqEncoder,
+                 summary_layer: Seq2SeqEncoder,
                  residual_encoder: Seq2SeqEncoder,
                  span_start_encoder: Seq2SeqEncoder,
                  span_end_encoder: Seq2SeqEncoder,
@@ -36,7 +37,13 @@ class BidafPlusSelfAttention(Model):
 
         self._text_field_embedder = text_field_embedder
         self._phrase_layer = phrase_layer
+
+        self._summary_layer = summary_layer
+        self._fcx = TimeDistributed(torch.nn.Linear(200, 200))
+        self._fch = TimeDistributed(torch.nn.Linear(200, 200))
+
         self._matrix_attention = TriLinearAttention(200)
+        self._matrix_attention_ruminate = TriLinearAttention(200)
         self._highway_layer = TimeDistributed(Highway(text_field_embedder.get_output_dim(),
                                         2))
         self._merge_atten = TimeDistributed(torch.nn.Linear(200 * 4, 200))
@@ -69,6 +76,20 @@ class BidafPlusSelfAttention(Model):
             raise ValueError()
             # self._dropout = lambda x: x
         self._mask_lstms = mask_lstms
+
+        # RUMINATE LAYER START
+        self._merge_atten_ruminate = TimeDistributed(torch.nn.Linear(200 * 4, 200))
+        self._merge_gate_ruminate = TimeDistributed(torch.nn.Linear(200 * 4, 200))
+        self._fcqz = TimeDistributed(torch.nn.Linear(200, 200))
+        self._fcqx = TimeDistributed(torch.nn.Linear(200, 200))
+        self._fcfqz = TimeDistributed(torch.nn.Linear(200, 200))
+        self._fcfqx = TimeDistributed(torch.nn.Linear(200, 200))
+
+        self._fccz = TimeDistributed(torch.nn.Linear(200, 200))
+        self._fccx = TimeDistributed(torch.nn.Linear(200, 200))
+        self._fcfcz = TimeDistributed(torch.nn.Linear(200, 200))
+        self._fcfcx = TimeDistributed(torch.nn.Linear(200, 200))
+        # RUMINATE LAYER END        
 
     def forward(self,  # type: ignore
                 question: Dict[str, torch.LongTensor],
@@ -134,6 +155,7 @@ class BidafPlusSelfAttention(Model):
         embedded_passage = self._dropout(self._highway_layer(passage_embedding))
         batch_size = embedded_question.size(0)
         passage_length = embedded_passage.size(1)
+        question_length = embedded_question.size(1)
         question_mask = util.get_text_field_mask(question).float()
         passage_mask = util.get_text_field_mask(passage).float()
         question_lstm_mask = question_mask if self._mask_lstms else None
@@ -177,15 +199,68 @@ class BidafPlusSelfAttention(Model):
         final_gate = F.sigmoid(self._merge_gate(final_merged_passage))
         final_merged_passage = final_merged_passage_ * final_gate
 
+        # RUMINATE LAYER START
+        summary = self._dropout(self._summary_layer(self._dropout(final_merged_passage), passage_mask))
+        x = self._fcx(final_merged_passage)
+        h = self._fch(summary)
+        a = torch.mean(x * F.sigmoid(x + h), 1).unsqueeze(1) 
+
+        ##Query
+        q = a.repeat(1,question_length,1)
+        zq = F.tanh(self._fcqx(encoded_question) + self._fcqz(q))
+        fq = F.sigmoid(self._fcfqx(encoded_question) + self._fcfqz(q))
+        encoded_question = fq * encoded_question + (1 - fq) * zq
+
+        ##Context
+        c = a.repeat(1,passage_length,1)
+        zc = F.tanh(self._fccx(encoded_passage) + self._fccz(c))
+        fc = F.sigmoid(self._fcfcx(encoded_passage) + self._fcfcz(c))
+        encoded_passage = fc * encoded_passage + (1 - fc) * zc
+
+        # Shape: (batch_size, passage_length, question_length)
+        passage_question_similarity = self._matrix_attention_ruminate(encoded_passage, encoded_question)
+        # Shape: (batch_size, passage_length, question_length)
+        passage_question_attention = util.last_dim_softmax(passage_question_similarity, question_mask)
+        # Shape: (batch_size, passage_length, encoding_dim)
+        passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
+
+        # We replace masked values with something really negative here, so they don't affect the
+        # max below.
+        masked_similarity = util.replace_masked_values(passage_question_similarity,
+                                                       question_mask.unsqueeze(1),
+                                                       -1e7)
+        # Shape: (batch_size, passage_length)
+        question_passage_similarity = masked_similarity.max(dim=-1)[0].squeeze(-1)
+        # Shape: (batch_size, passage_length)
+        question_passage_attention = util.masked_softmax(question_passage_similarity, passage_mask)
+        # Shape: (batch_size, encoding_dim)
+        question_passage_vector = util.weighted_sum(encoded_passage, question_passage_attention)
+        # Shape: (batch_size, passage_length, encoding_dim)
+        tiled_question_passage_vector = question_passage_vector.unsqueeze(1).expand(batch_size,
+                                                                                    passage_length,
+                                                                                    encoding_dim)
+
+        # Shape: (batch_size, passage_length, encoding_dim * 4)
+        final_merged_passage = torch.cat([encoded_passage,
+                                          passage_question_vectors,
+                                          encoded_passage * passage_question_vectors,
+                                          encoded_passage * tiled_question_passage_vector],
+                                         dim=-1)
+
+        final_merged_passage_ = F.relu(self._merge_atten_ruminate(final_merged_passage))
+        final_gate = F.sigmoid(self._merge_gate_ruminate(final_merged_passage))
+        final_merged_passage = final_merged_passage_ * final_gate
+        # RUMINATE LAYER END
+
+
         residual_layer = self._dropout(self._residual_encoder(self._dropout(final_merged_passage), passage_mask))
         self_atten_matrix = self._self_atten(residual_layer, residual_layer)
-
         mask = passage_mask.resize(batch_size, passage_length, 1) * passage_mask.resize(batch_size, 1, passage_length)
 
         # torch.eye does not have a gpu implementation, so we are forced to use the cpu one and .cuda()
         # Not sure if this matters for performance
         position_matrix = np.repeat(np.resize(np.arange(passage_length), [1, passage_length]), [passage_length], axis=0)
-        position_matrix = Variable(torch.from_numpy(1 - abs(position_matrix - np.transpose(position_matrix)) / passage_length).float()).cuda()
+        position_matrix = Variable(torch.from_numpy(np.power(0.99,abs(np.transpose(position_matrix)-position_matrix))).float()).cuda()
 
         self_mask = Variable(torch.eye(passage_length, passage_length).cuda()).resize(1, passage_length, passage_length)
         mask = mask * (1 - self_mask) * position_matrix
@@ -223,10 +298,10 @@ class BidafPlusSelfAttention(Model):
         span_end_logits = self._span_end_predictor(end_rep).squeeze(-1)
         span_end_probs = util.masked_softmax(span_end_logits, passage_mask)
 
-        span_start_logits = util.replace_masked_values(span_start_logits, passage_mask, -1e7)
-        span_end_logits = util.replace_masked_values(span_end_logits, passage_mask, -1e7)
+        span_start_logits = util.replace_masked_values(span_start_logits, passage_mask, 0)
+        span_end_logits = util.replace_masked_values(span_end_logits, passage_mask, 0)
 
-        best_span = self._get_best_span(span_start_logits, span_end_logits)
+        best_span = self._get_best_span(span_start_probs, span_end_probs)
 
 
         output_dict = {"span_start_logits": span_start_logits,
@@ -284,29 +359,42 @@ class BidafPlusSelfAttention(Model):
         span_start_argmax = [0] * batch_size
         best_word_span = Variable(span_start_logits.data.new()
                                   .resize_(batch_size, 2).fill_(0)).long()
-
-        span_start_logits = span_start_logits.data.cpu().numpy()
-        span_end_logits = span_end_logits.data.cpu().numpy()
-
-        for b in range(batch_size):  # pylint: disable=invalid-name
+        max_answer_span = 17
+        start_end_matrix = torch.bmm(span_start_logits.unsqueeze(-1), span_end_logits.unsqueeze(1))
+        start_end_matrix = start_end_matrix.data.cpu().numpy()
+        for b in range(batch_size):
+            max_span_log_prob = 0
             for j in range(passage_length):
-                val1 = span_start_logits[b, span_start_argmax[b]]
-                if val1 < span_start_logits[b, j]:
-                    span_start_argmax[b] = j
-                    val1 = span_start_logits[b, j]
+                range_prob = start_end_matrix[b, j, j:j+max_answer_span]
+                index = np.argmax(range_prob)
+                if range_prob[index] > max_span_log_prob:
+                    max_span_log_prob = range_prob[index]
+                    best_word_span[b, 0] = j
+                    best_word_span[b, 1] = j + int(index)
 
-                val2 = span_end_logits[b, j]
+        # span_start_logits = span_start_logits.data.cpu().numpy()
+        # span_end_logits = span_end_logits.data.cpu().numpy()
+                
+        # for b in range(batch_size):  # pylint: disable=invalid-name
+        #     for j in range(passage_length):
+        #         val1 = span_start_logits[b, span_start_argmax[b]]
+        #         if val1 < span_start_logits[b, j]:
+        #             span_start_argmax[b] = j
+        #             val1 = span_start_logits[b, j]
 
-                if val1 + val2 > max_span_log_prob[b]:
-                    best_word_span[b, 0] = span_start_argmax[b]
-                    best_word_span[b, 1] = j
-                    max_span_log_prob[b] = val1 + val2
+        #         val2 = span_end_logits[b, j]
+
+        #         if val1 + val2 > max_span_log_prob[b]:
+        #             best_word_span[b, 0] = span_start_argmax[b]
+        #             best_word_span[b, 1] = j
+        #             max_span_log_prob[b] = val1 + val2
         return best_word_span
 
     @classmethod
     def from_params(cls, vocab: Vocabulary, params: Params) -> 'BidirectionalAttentionFlow':
         embedder_params = params.pop("text_field_embedder")
         text_field_embedder = TextFieldEmbedder.from_params(vocab, embedder_params)
+        summary_layer = Seq2SeqEncoder.from_params(params.pop("summery_layer"))
         phrase_layer = Seq2SeqEncoder.from_params(params.pop("phrase_layer"))
         residual_encoder = Seq2SeqEncoder.from_params(params.pop("residual_encoder"))
         span_start_encoder = Seq2SeqEncoder.from_params(params.pop("span_start_encoder"))
@@ -324,6 +412,7 @@ class BidafPlusSelfAttention(Model):
         return cls(vocab=vocab,
                    text_field_embedder=text_field_embedder,
                    phrase_layer=phrase_layer,
+                   summary_layer=summary_layer,
                    residual_encoder=residual_encoder,
                    span_start_encoder=span_start_encoder,
                    span_end_encoder=span_end_encoder,

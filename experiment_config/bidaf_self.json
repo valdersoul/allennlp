@@ -43,28 +43,35 @@
       }
     },
     "phrase_layer": {
-      "type": "gru",
+      "type": "lstm",
       "bidirectional": true,
       "input_size": 200,
       "hidden_size": 100,
       "num_layers": 1
+    },
+    "summery_layer": {
+      "type": "lstm",
+      "bidirectional": true,
+      "input_size": 200,
+      "hidden_size": 100,
+      "num_layers":1
     },
     "residual_encoder": {
-      "type": "gru",
+      "type": "lstm",
       "bidirectional": true,
       "input_size": 200,
       "hidden_size": 100,
-      "num_layers": 1
+      "num_layers": 2
     },
     "span_start_encoder": {
-      "type": "gru",
+      "type": "lstm",
       "bidirectional": true,
       "input_size": 200,
       "hidden_size": 100,
       "num_layers": 1
     },
     "span_end_encoder": {
-      "type": "gru",
+      "type": "lstm",
       "bidirectional": true,
       "input_size": 400,
       "hidden_size": 100,
