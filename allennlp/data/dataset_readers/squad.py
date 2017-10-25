@@ -13,7 +13,7 @@ from allennlp.common.checks import ConfigurationError
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset import Dataset
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
-from allennlp.data.fields import Field, TextField, ListField, IndexField, MetadataField
+from allennlp.data.fields import Field, TextField, ListField, IndexField, MetadataField, SequenceLabelField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import SingleIdTokenIndexer, TokenIndexer
 from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
@@ -108,6 +108,17 @@ class SquadReader(DatasetReader):
                  token_indexers: Dict[str, TokenIndexer] = None) -> None:
         self._tokenizer = tokenizer or WordTokenizer()
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
+        self._query_type = {'who': 0,
+                            'when': 1,
+                            'where': 2,
+                            'what': 3,
+                            'which': 4,
+                            'where': 5,
+                            'why': 6,
+                            'whose': 7,
+                            'whom': 8,
+                            }
+        self._be_type = ['am', 'are', 'was', 'were', 'is']
 
     @overrides
     def read(self, file_path: str):
@@ -145,7 +156,6 @@ class SquadReader(DatasetReader):
                         candidate_answers[(answer["answer_start"], answer["text"])] += 1
                     answer_texts = [answer['text'] for answer in question_answer['answers']]
                     char_span_start, answer_text = candidate_answers.most_common(1)[0][0]
-
                     instance = self.text_to_instance(question_text,
                                                      paragraph,
                                                      fields,
@@ -180,6 +190,25 @@ class SquadReader(DatasetReader):
         fields['passage'] = passage_field
         fields['question'] = TextField(question_tokens, self._token_indexers)
 
+        em_label = []
+        for token in passage_tokens:
+            em_label.append(1 if token.text in question_text else 0)
+        fields['passage_em'] = SequenceLabelField(em_label, passage_field)
+
+        em_label = []
+        for token in question_tokens:
+            em_label.append(1 if token.text in passage_text else 0)
+        fields['question_em'] = SequenceLabelField(em_label, fields['question'])
+
+        first_query_word = question_tokens[0].text.lower()
+        if first_query_word in self._query_type.keys():
+            fields['question_type'] = IndexField(self._query_type[first_query_word], fields['question'])
+        elif first_query_word in self._be_type:
+            fields['question_type'] = IndexField(9, fields['question'])
+        else:
+            fields['question_type'] = IndexField(10, fields['question'])
+
+
         if answer_text:
             # SQuAD gives answer annotations as a character index into the paragraph, but we need a
             # token index for our models.  We convert them here.
@@ -200,6 +229,7 @@ class SquadReader(DatasetReader):
             fields['span_end'] = IndexField(span_end, passage_field)
         metadata = {
                 'original_passage': passage_text,
+                'question': question_text,
                 'token_offsets': passage_offsets
                 }
         if question_id:

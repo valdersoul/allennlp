@@ -31,7 +31,7 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
     def get_output_dim(self) -> int:
         output_dim = 0
         for key, embedder in self._token_embedders.items():
-            if 'pos' in key:
+            if 'pos' in key or 'ner' in key:
                 continue
             output_dim += embedder.get_output_dim()
         return output_dim
@@ -43,16 +43,16 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
             raise ConfigurationError(message)
         embedded_representations = []
         keys = sorted(text_field_input.keys())
-        pos_embedding = ''
+        extra_embedding = []
         for key in keys:
             tensor = text_field_input[key]
             embedder = self._token_embedders[key]
             token_vectors = embedder(tensor)
-            if 'pos' in key:
-                pos_embedding = token_vectors
+            if 'pos' in key or 'ner' in key:
+                extra_embedding.append(token_vectors)
             else:
                 embedded_representations.append(token_vectors)
-        return torch.cat(embedded_representations, dim=-1), pos_embedding
+        return torch.cat(embedded_representations, dim=-1), torch.cat(extra_embedding, dim=-1)
 
     @classmethod
     def from_params(cls, vocab: Vocabulary, params: Params) -> 'BasicTextFieldEmbedder':

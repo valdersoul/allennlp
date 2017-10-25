@@ -177,6 +177,6 @@ class SpacyWordSplitter(WordSplitter):
         language = params.pop('language', 'en')
         pos_tags = params.pop('pos_tags', True)
         parse = params.pop('parse', False)
-        ner = params.pop('ner', False)
+        ner = params.pop('ner', True)
         params.assert_empty(cls.__name__)
         return cls(language, pos_tags, parse, ner)
